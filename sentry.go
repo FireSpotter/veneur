@@ -38,7 +38,7 @@ func ConsumePanic(sentry *raven.Client, recorder *Recorder, hostname string, err
 		}
 
 		_, ch := sentry.Capture(&p, nil)
-		recorder.SentryError()
+		recorder.SentryErrorCount()
 
 		// we don't want the program to terminate before reporting to sentry
 		<-ch
