@@ -16,7 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/DataDog/datadog-go/statsd"
 	"github.com/Sirupsen/logrus"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
@@ -68,8 +67,8 @@ type Server struct {
 	EventWorker *EventWorker
 	TraceWorker *TraceWorker
 
-	Statsd *statsd.Client
-	Sentry *raven.Client
+	Recorder *Recorder
+	Sentry   *raven.Client
 
 	Hostname string
 	Tags     []string
@@ -159,13 +158,6 @@ func NewFromConfig(conf Config) (ret Server, err error) {
 	// }
 	ret.FlushMaxPerBody = conf.FlushMaxPerBody
 
-	ret.Statsd, err = statsd.NewBuffered(conf.StatsAddress, 1024)
-	if err != nil {
-		return
-	}
-	ret.Statsd.Namespace = "veneur."
-	ret.Statsd.Tags = append(ret.Tags, "veneurlocalonly")
-
 	// nil is a valid sentry client that noops all methods, if there is no DSN
 	// we can just leave it as nil
 	if conf.SentryDsn != "" {
@@ -207,17 +199,17 @@ func NewFromConfig(conf Config) (ret Server, err error) {
 
 	// Use the pre-allocated Workers slice to know how many to start.
 	for i := range ret.Workers {
-		ret.Workers[i] = NewWorker(i+1, ret.Statsd, log)
+		ret.Workers[i] = NewWorker(i+1, ret.Recorderr, log)
 		// do not close over loop index
 		go func(w *Worker) {
 			defer func() {
-				ConsumePanic(ret.Sentry, ret.Statsd, ret.Hostname, recover())
+				ConsumePanic(ret.Sentry, ret.Recorder, ret.Hostname, recover())
 			}()
 			w.Work()
 		}(ret.Workers[i])
 	}
 
-	ret.EventWorker = NewEventWorker(ret.Statsd)
+	ret.EventWorker = NewEventWorker(ret.Recorder)
 
 	ret.UDPAddr, err = net.ResolveUDPAddr("udp", conf.UdpAddress)
 	if err != nil {
@@ -282,7 +274,7 @@ func NewFromConfig(conf Config) (ret Server, err error) {
 			bufferSize = defaultSpanBufferSize
 		}
 
-		ret.TraceWorker = NewTraceWorker(ret.Statsd, bufferSize)
+		ret.TraceWorker = NewTraceWorker(ret.Recorder, bufferSize)
 
 		ret.TraceAddr, err = net.ResolveUDPAddr("udp", conf.SsfAddress)
 		log.WithField("traceaddr", ret.TraceAddr).Info("Listening for trace spans on address")
@@ -413,7 +405,7 @@ func NewFromConfig(conf Config) (ret Server, err error) {
 
 	if conf.InfluxAddress != "" {
 		plugin := influxdb.NewInfluxDBPlugin(
-			log, conf.InfluxAddress, conf.InfluxConsistency, conf.InfluxDBName, ret.HTTPClient, ret.Statsd,
+			log, conf.InfluxAddress, conf.InfluxConsistency, conf.InfluxDBName, ret.HTTPClient, ret.Recorder,
 		)
 		ret.registerPlugin(plugin)
 	}
@@ -441,7 +433,7 @@ func (s *Server) Start() {
 	go func() {
 		log.Info("Starting Event worker")
 		defer func() {
-			ConsumePanic(s.Sentry, s.Statsd, s.Hostname, recover())
+			ConsumePanic(s.Sentry, s.Recorder, s.Hostname, recover())
 		}()
 		s.EventWorker.Work()
 	}()
@@ -450,7 +442,7 @@ func (s *Server) Start() {
 		log.Info("Starting Trace worker")
 		go func() {
 			defer func() {
-				ConsumePanic(s.Sentry, s.Statsd, s.Hostname, recover())
+				ConsumePanic(s.Sentry, s.Recorder, s.Hostname, recover())
 			}()
 			s.TraceWorker.Work()
 		}()
@@ -473,7 +465,7 @@ func (s *Server) Start() {
 	for i := 0; i < s.numReaders; i++ {
 		go func() {
 			defer func() {
-				ConsumePanic(s.Sentry, s.Statsd, s.Hostname, recover())
+				ConsumePanic(s.Sentry, s.Recorder, s.Hostname, recover())
 			}()
 			s.ReadMetricSocket(packetPool, s.numReaders != 1)
 		}()
@@ -505,7 +497,7 @@ func (s *Server) Start() {
 
 		go func() {
 			defer func() {
-				ConsumePanic(s.Sentry, s.Statsd, s.Hostname, recover())
+				ConsumePanic(s.Sentry, s.Recorder, s.Hostname, recover())
 			}()
 			s.ReadTCPSocket()
 		}()
@@ -517,7 +509,7 @@ func (s *Server) Start() {
 	if s.TracingEnabled() {
 		go func() {
 			defer func() {
-				ConsumePanic(s.Sentry, s.Statsd, s.Hostname, recover())
+				ConsumePanic(s.Sentry, s.Recorder, s.Hostname, recover())
 			}()
 			s.ReadTraceSocket(tracePool)
 		}()
@@ -528,7 +520,7 @@ func (s *Server) Start() {
 	// Flush every Interval forever!
 	go func() {
 		defer func() {
-			ConsumePanic(s.Sentry, s.Statsd, s.Hostname, recover())
+			ConsumePanic(s.Sentry, s.Recorder, s.Hostname, recover())
 		}()
 		ticker := time.NewTicker(s.interval)
 		for {
@@ -564,7 +556,7 @@ func (s *Server) HandleMetricPacket(packet []byte) error {
 				logrus.ErrorKey: err,
 				"packet":        string(packet),
 			}).Warn("Could not parse packet")
-			s.Statsd.Count("packet.error_total", 1, []string{"packet_type:event", "reason:parse"}, 1.0)
+			s.Recorder.Count("packet.error_total", 1, []string{"packet_type:event", "reason:parse"}, 1.0)
 			return err
 		}
 		s.EventWorker.EventChan <- *event
@@ -575,7 +567,7 @@ func (s *Server) HandleMetricPacket(packet []byte) error {
 				logrus.ErrorKey: err,
 				"packet":        string(packet),
 			}).Warn("Could not parse packet")
-			s.Statsd.Count("packet.error_total", 1, []string{"packet_type:service_check", "reason:parse"}, 1.0)
+			s.Recorder.Count("packet.error_total", 1, []string{"packet_type:service_check", "reason:parse"}, 1.0)
 			return err
 		}
 		s.EventWorker.ServiceCheckChan <- *svcheck
@@ -586,7 +578,7 @@ func (s *Server) HandleMetricPacket(packet []byte) error {
 				logrus.ErrorKey: err,
 				"packet":        string(packet),
 			}).Warn("Could not parse packet")
-			s.Statsd.Count("packet.error_total", 1, []string{"packet_type:metric", "reason:parse"}, 1.0)
+			s.Recorder.Count("packet.error_total", 1, []string{"packet_type:metric", "reason:parse"}, 1.0)
 			return err
 		}
 		s.Workers[metric.Digest%uint32(len(s.Workers))].PacketChan <- *metric
@@ -597,10 +589,10 @@ func (s *Server) HandleMetricPacket(packet []byte) error {
 // HandleTracePacket accepts an incoming packet as bytes and sends it to the
 // appropriate worker.
 func (s *Server) HandleTracePacket(packet []byte) {
-	s.Statsd.Incr("packet.received_total", nil, .1)
+	s.Recorder.Incr("packet.received_total", nil, .1)
 	// Unlike metrics, protobuf shouldn't have an issue with 0-length packets
 	if len(packet) == 0 {
-		s.Statsd.Count("packet.error_total", 1, []string{"packet_type:unknown", "reason:zerolength"}, 1.0)
+		s.Recorder.Count("packet.error_total", 1, []string{"packet_type:unknown", "reason:zerolength"}, 1.0)
 		log.Warn("received zero-length trace packet")
 		return
 	}
@@ -608,7 +600,7 @@ func (s *Server) HandleTracePacket(packet []byte) {
 	sample, metrics, err := samplers.ParseSSF(packet)
 	if err != nil {
 		reason := fmt.Sprintf("reason:%s", err.Error())
-		s.Statsd.Count("packet.error_total", 1, []string{"packet_type:ssf_metric", reason}, 1.0)
+		s.Recorder.Count("packet.error_total", 1, []string{"packet_type:ssf_metric", reason}, 1.0)
 		log.WithError(err).Warn("ParseSSF")
 		return
 	}
@@ -618,7 +610,7 @@ func (s *Server) HandleTracePacket(packet []byte) {
 	}
 
 	if sample != nil {
-		s.Statsd.Incr("packet.spans.received_total", []string{fmt.Sprintf("service:%s", sample.Service)}, .1)
+		s.Recorder.Incr("packet.spans.received_total", []string{fmt.Sprintf("service:%s", sample.Service)}, .1)
 		s.TraceWorker.TraceChan <- *sample
 	}
 }
@@ -647,7 +639,7 @@ func (s *Server) ReadMetricSocket(packetPool *sync.Pool, reuseport bool) {
 			continue
 		}
 		if n > s.metricMaxLength {
-			s.Statsd.Count("packet.error_total", 1, []string{"packet_type:unknown", "reason:toolong"}, 1.0)
+			s.Recorder.Count("packet.error_total", 1, []string{"packet_type:unknown", "reason:toolong"}, 1.0)
 			continue
 		}
 
@@ -716,7 +708,7 @@ func (s *Server) handleTCPGoroutine(conn net.Conn) {
 	defer func() {
 		log.WithField("peer", conn.RemoteAddr()).Debug("Closing TCP connection")
 		err := conn.Close()
-		s.Statsd.Count("tcp.disconnects", 1, nil, 1.0)
+		s.Recorder.Count("tcp.disconnects", 1, nil, 1.0)
 		if err != nil {
 			// most often "write: broken pipe"; not really an error
 			log.WithFields(logrus.Fields{
@@ -725,7 +717,7 @@ func (s *Server) handleTCPGoroutine(conn net.Conn) {
 			}).Info("TCP close failed")
 		}
 	}()
-	s.Statsd.Count("tcp.connects", 1, nil, 1.0)
+	s.Recorder.Count("tcp.connects", 1, nil, 1.0)
 
 	// time out idle connections to prevent leaking memory/goroutines
 	timeout := defaultTCPReadTimeout
@@ -740,7 +732,7 @@ func (s *Server) handleTCPGoroutine(conn net.Conn) {
 		if err != nil {
 			// usually io.EOF or "read: connection reset by peer"; not really errors
 			// it can also be caused by certificate authentication problems
-			s.Statsd.Count("tcp.tls_handshake_failures", 1, nil, 1.0)
+			s.Recorder.Count("tcp.tls_handshake_failures", 1, nil, 1.0)
 			log.WithFields(logrus.Fields{
 				logrus.ErrorKey: err,
 				"peer":          conn.RemoteAddr(),

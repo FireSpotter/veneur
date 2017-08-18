@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/DataDog/datadog-go/statsd"
 	"github.com/Sirupsen/logrus"
 	lightstep "github.com/lightstep/lightstep-tracer-go"
 	opentracing "github.com/opentracing/opentracing-go"
@@ -68,12 +67,12 @@ func (s *Server) FlushGlobal(ctx context.Context) {
 		for _, p := range s.getPlugins() {
 			start := time.Now()
 			err := p.Flush(finalMetrics, s.Hostname)
-			s.Statsd.TimeInMilliseconds(fmt.Sprintf("flush.plugins.%s.total_duration_ns", p.Name()), float64(time.Since(start).Nanoseconds()), []string{"part:post"}, 1.0)
+			s.Recorder.PluginFlushDuration(p.Name(), start)
 			if err != nil {
 				countName := fmt.Sprintf("flush.plugins.%s.error_total", p.Name())
-				s.Statsd.Count(countName, 1, []string{}, 1.0)
+				s.Recorder.Count(countName, 1, []string{}, 1.0)
 			}
-			s.Statsd.Gauge(fmt.Sprintf("flush.plugins.%s.post_metrics_total", p.Name()), float64(len(finalMetrics)), nil, 1.0)
+			s.Recorder.Gauge(fmt.Sprintf("flush.plugins.%s.post_metrics_total", p.Name()), float64(len(finalMetrics)), nil, 1.0)
 		}
 	}()
 
@@ -109,12 +108,12 @@ func (s *Server) FlushLocal(ctx context.Context) {
 		for _, p := range s.getPlugins() {
 			start := time.Now()
 			err := p.Flush(finalMetrics, s.Hostname)
-			s.Statsd.TimeInMilliseconds(fmt.Sprintf("flush.plugins.%s.total_duration_ns", p.Name()), float64(time.Since(start).Nanoseconds()), []string{"part:post"}, 1.0)
+			s.Recorder.TimeInMilliseconds(fmt.Sprintf("flush.plugins.%s.total_duration_ns", p.Name()), float64(time.Since(start).Nanoseconds()), []string{"part:post"}, 1.0)
 			if err != nil {
 				countName := fmt.Sprintf("flush.plugins.%s.error_total", p.Name())
-				s.Statsd.Count(countName, 1, []string{}, 1.0)
+				s.Recorder.Count(countName, 1, []string{}, 1.0)
 			}
-			s.Statsd.Gauge(fmt.Sprintf("flush.plugins.%s.post_metrics_total", p.Name()), float64(len(finalMetrics)), nil, 1.0)
+			s.Recorder.Gauge(fmt.Sprintf("flush.plugins.%s.post_metrics_total", p.Name()), float64(len(finalMetrics)), nil, 1.0)
 		}
 	}()
 
@@ -167,7 +166,7 @@ func (s *Server) tallyMetrics(percentiles []float64) ([]WorkerMetrics, metricsSu
 		ms.totalLocalTimers += len(wm.localTimers)
 	}
 
-	s.Statsd.TimeInMilliseconds("flush.total_duration_ns", float64(time.Since(gatherStart).Nanoseconds()), []string{"part:gather"}, 1.0)
+	s.Recorder.TimeInMilliseconds("flush.total_duration_ns", float64(time.Since(gatherStart).Nanoseconds()), []string{"part:gather"}, 1.0)
 
 	ms.totalLength = ms.totalCounters + ms.totalGauges +
 		// histograms and timers each report a metric point for each percentile
@@ -240,7 +239,7 @@ func (s *Server) generateDDMetrics(ctx context.Context, percentiles []float64, t
 	}
 
 	finalizeMetrics(s.Hostname, s.Tags, finalMetrics)
-	s.Statsd.TimeInMilliseconds("flush.total_duration_ns", float64(time.Since(span.Start).Nanoseconds()), []string{"part:combine"}, 1.0)
+	s.Recorder.TimeInMilliseconds("flush.total_duration_ns", float64(time.Since(span.Start).Nanoseconds()), []string{"part:combine"}, 1.0)
 
 	return finalMetrics
 }
@@ -253,11 +252,11 @@ func (s *Server) generateDDMetrics(ctx context.Context, percentiles []float64, t
 // It also does not report the total metrics posted, because on the local veneur,
 // that should happen *after* the flush-forward operation.
 func (s *Server) reportMetricsFlushCounts(ms metricsSummary) {
-	s.Statsd.Count("worker.metrics_flushed_total", int64(ms.totalCounters), []string{"metric_type:counter"}, 1.0)
-	s.Statsd.Count("worker.metrics_flushed_total", int64(ms.totalGauges), []string{"metric_type:gauge"}, 1.0)
-	s.Statsd.Count("worker.metrics_flushed_total", int64(ms.totalLocalHistograms), []string{"metric_type:local_histogram"}, 1.0)
-	s.Statsd.Count("worker.metrics_flushed_total", int64(ms.totalLocalSets), []string{"metric_type:local_set"}, 1.0)
-	s.Statsd.Count("worker.metrics_flushed_total", int64(ms.totalLocalTimers), []string{"metric_type:local_timer"}, 1.0)
+	s.Recorder.Count("worker.metrics_flushed_total", int64(ms.totalCounters), []string{"metric_type:counter"}, 1.0)
+	s.Recorder.Count("worker.metrics_flushed_total", int64(ms.totalGauges), []string{"metric_type:gauge"}, 1.0)
+	s.Recorder.Count("worker.metrics_flushed_total", int64(ms.totalLocalHistograms), []string{"metric_type:local_histogram"}, 1.0)
+	s.Recorder.Count("worker.metrics_flushed_total", int64(ms.totalLocalSets), []string{"metric_type:local_set"}, 1.0)
+	s.Recorder.Count("worker.metrics_flushed_total", int64(ms.totalLocalTimers), []string{"metric_type:local_timer"}, 1.0)
 }
 
 // reportGlobalMetricsFlushCounts reports the counts of
@@ -270,10 +269,10 @@ func (s *Server) reportGlobalMetricsFlushCounts(ms metricsSummary) {
 	// this avoids double-counting problems where a local veneur reports
 	// histograms that it received, and then a global veneur reports them
 	// again
-	s.Statsd.Count("worker.metrics_flushed_total", int64(ms.totalGlobalCounters), []string{"metric_type:global_counter"}, 1.0)
-	s.Statsd.Count("worker.metrics_flushed_total", int64(ms.totalHistograms), []string{"metric_type:histogram"}, 1.0)
-	s.Statsd.Count("worker.metrics_flushed_total", int64(ms.totalSets), []string{"metric_type:set"}, 1.0)
-	s.Statsd.Count("worker.metrics_flushed_total", int64(ms.totalTimers), []string{"metric_type:timer"}, 1.0)
+	s.Recorder.Count("worker.metrics_flushed_total", int64(ms.totalGlobalCounters), []string{"metric_type:global_counter"}, 1.0)
+	s.Recorder.Count("worker.metrics_flushed_total", int64(ms.totalHistograms), []string{"metric_type:histogram"}, 1.0)
+	s.Recorder.Count("worker.metrics_flushed_total", int64(ms.totalSets), []string{"metric_type:set"}, 1.0)
+	s.Recorder.Count("worker.metrics_flushed_total", int64(ms.totalTimers), []string{"metric_type:timer"}, 1.0)
 }
 
 // flushRemote breaks up the final metrics into chunks
@@ -285,11 +284,11 @@ func (s *Server) flushRemote(ctx context.Context, finalMetrics []samplers.DDMetr
 	mem := &runtime.MemStats{}
 	runtime.ReadMemStats(mem)
 
-	s.Statsd.Gauge("mem.heap_alloc_bytes", float64(mem.HeapAlloc), nil, 1.0)
-	s.Statsd.Gauge("gc.number", float64(mem.NumGC), nil, 1.0)
-	s.Statsd.Gauge("gc.pause_total_ns", float64(mem.PauseTotalNs), nil, 1.0)
+	s.Recorder.Gauge("mem.heap_alloc_bytes", float64(mem.HeapAlloc), nil, 1.0)
+	s.Recorder.Gauge("gc.number", float64(mem.NumGC), nil, 1.0)
+	s.Recorder.Gauge("gc.pause_total_ns", float64(mem.PauseTotalNs), nil, 1.0)
 
-	s.Statsd.Gauge("flush.post_metrics_total", float64(len(finalMetrics)), nil, 1.0)
+	s.Recorder.Gauge("flush.post_metrics_total", float64(len(finalMetrics)), nil, 1.0)
 	// Check to see if we have anything to do
 	if len(finalMetrics) == 0 {
 		log.Info("Nothing to flush, skipping.")
@@ -315,7 +314,7 @@ func (s *Server) flushRemote(ctx context.Context, finalMetrics []samplers.DDMetr
 		go s.flushPart(span.Attach(ctx), chunk, &wg)
 	}
 	wg.Wait()
-	s.Statsd.TimeInMilliseconds("flush.total_duration_ns", float64(time.Since(flushStart).Nanoseconds()), []string{"part:post"}, 1.0)
+	s.Recorder.TimeInMilliseconds("flush.total_duration_ns", float64(time.Since(flushStart).Nanoseconds()), []string{"part:post"}, 1.0)
 
 	log.WithField("metrics", len(finalMetrics)).Info("Completed flush to Datadog")
 }
@@ -348,7 +347,7 @@ func finalizeMetrics(hostname string, tags []string, finalMetrics []samplers.DDM
 // flushPart flushes a set of metrics to the remote API server
 func (s *Server) flushPart(ctx context.Context, metricSlice []samplers.DDMetric, wg *sync.WaitGroup) {
 	defer wg.Done()
-	postHelper(ctx, s.HTTPClient, s.Statsd, fmt.Sprintf("%s/api/v1/series?api_key=%s", s.DDHostname, s.DDAPIKey), map[string][]samplers.DDMetric{
+	postHelper(ctx, s.HTTPClient, s.Recorder, fmt.Sprintf("%s/api/v1/series?api_key=%s", s.DDHostname, s.DDAPIKey), map[string][]samplers.DDMetric{
 		"series": metricSlice,
 	}, "flush", true)
 }
@@ -417,9 +416,9 @@ func (s *Server) flushForward(ctx context.Context, wms []WorkerMetrics) {
 			jsonMetrics = append(jsonMetrics, jm)
 		}
 	}
-	s.Statsd.TimeInMilliseconds("forward.duration_ns", float64(time.Since(exportStart).Nanoseconds()), []string{"part:export"}, 1.0)
+	s.Recorder.TimeInMilliseconds("forward.duration_ns", float64(time.Since(exportStart).Nanoseconds()), []string{"part:export"}, 1.0)
 
-	s.Statsd.Gauge("forward.post_metrics_total", float64(len(jsonMetrics)), nil, 1.0)
+	s.Recorder.Gauge("forward.post_metrics_total", float64(len(jsonMetrics)), nil, 1.0)
 	if len(jsonMetrics) == 0 {
 		log.Debug("Nothing to forward, skipping.")
 		return
@@ -431,10 +430,10 @@ func (s *Server) flushForward(ctx context.Context, wms []WorkerMetrics) {
 	if err != nil {
 		// not a fatal error if we fail
 		// we'll just try to use the host as it was given to us
-		s.Statsd.Count("forward.error_total", 1, []string{"cause:dns"}, 1.0)
+		s.Recorder.Count("forward.error_total", 1, []string{"cause:dns"}, 1.0)
 		log.WithError(err).Warn("Could not re-resolve host for forward")
 	}
-	s.Statsd.TimeInMilliseconds("forward.duration_ns", float64(time.Since(dnsStart).Nanoseconds()), []string{"part:dns"}, 1.0)
+	s.Recorder.TimeInMilliseconds("forward.duration_ns", float64(time.Since(dnsStart).Nanoseconds()), []string{"part:dns"}, 1.0)
 
 	// the error has already been logged (if there was one), so we only care
 	// about the success case
@@ -507,7 +506,7 @@ func (s *Server) flushTraces(ctx context.Context) {
 				timeErr = "type:tooLate"
 			}
 			if timeErr != "" {
-				s.Statsd.Incr("worker.trace.sink.timestamp_error", []string{timeErr}, 1)
+				s.Recorder.Incr("worker.trace.sink.timestamp_error", []string{timeErr}, 1)
 			}
 
 			if ssfSpan.Tags == nil {
@@ -529,9 +528,9 @@ func (s *Server) flushTraces(ctx context.Context) {
 			fmt.Sprintf("sink:%s", sink.name),
 			fmt.Sprintf("service:%s", trace.Service),
 		}
-		s.Statsd.TimeInMilliseconds("worker.trace.sink.flush_duration_ns", float64(time.Since(sinkFlushStart).Nanoseconds()), []string{fmt.Sprintf("sink:%s", sink.name)}, 1.0)
+		s.Recorder.TimeInMilliseconds("worker.trace.sink.flush_duration_ns", float64(time.Since(sinkFlushStart).Nanoseconds()), []string{fmt.Sprintf("sink:%s", sink.name)}, 1.0)
 
-		s.Statsd.Count("worker.trace.sink.flushed_total", int64(len(ssfSpans)), tags, 1)
+		s.Recorder.Count("worker.trace.sink.flushed_total", int64(len(ssfSpans)), tags, 1)
 	}
 }
 
@@ -540,8 +539,8 @@ func (s *Server) flushEventsChecks(ctx context.Context) {
 	defer span.Finish()
 
 	events, checks := s.EventWorker.Flush()
-	s.Statsd.Count("worker.events_flushed_total", int64(len(events)), nil, 1.0)
-	s.Statsd.Count("worker.checks_flushed_total", int64(len(checks)), nil, 1.0)
+	s.Recorder.Count("worker.events_flushed_total", int64(len(events)), nil, 1.0)
+	s.Recorder.Count("worker.checks_flushed_total", int64(len(checks)), nil, 1.0)
 
 	// fill in the default hostname for packets that didn't set it
 	for i := range events {
@@ -562,7 +561,7 @@ func (s *Server) flushEventsChecks(ctx context.Context) {
 		// the official dd-agent
 		// we don't actually pass all the body keys that dd-agent passes here... but
 		// it still works
-		err := postHelper(context.TODO(), s.HTTPClient, s.Statsd, fmt.Sprintf("%s/intake?api_key=%s", s.DDHostname, s.DDAPIKey), map[string]map[string][]samplers.UDPEvent{
+		err := postHelper(context.TODO(), s.HTTPClient, s.Recorder, fmt.Sprintf("%s/intake?api_key=%s", s.DDHostname, s.DDAPIKey), map[string]map[string][]samplers.UDPEvent{
 			"events": {
 				"api": events,
 			},
@@ -580,7 +579,7 @@ func (s *Server) flushEventsChecks(ctx context.Context) {
 		// this endpoint is not documented to take an array... but it does
 		// another curious constraint of this endpoint is that it does not
 		// support "Content-Encoding: deflate"
-		err := postHelper(context.TODO(), s.HTTPClient, s.Statsd, fmt.Sprintf("%s/api/v1/check_run?api_key=%s", s.DDHostname, s.DDAPIKey), checks, "flush_checks", false)
+		err := postHelper(context.TODO(), s.HTTPClient, s.Recorder, fmt.Sprintf("%s/api/v1/check_run?api_key=%s", s.DDHostname, s.DDAPIKey), checks, "flush_checks", false)
 		if err == nil {
 			log.WithField("checks", len(checks)).Info("Completed flushing service checks to Datadog")
 		} else {
@@ -597,7 +596,7 @@ func (s *Server) flushEventsChecks(ctx context.Context) {
 // this function - probably a static string for each callsite
 // you can disable compression with compress=false for endpoints that don't
 // support it
-func postHelper(ctx context.Context, httpClient *http.Client, stats *statsd.Client, endpoint string, bodyObject interface{}, action string, compress bool) error {
+func postHelper(ctx context.Context, httpClient *http.Client, reporter *Reporter, endpoint string, bodyObject interface{}, action string, compress bool) error {
 	span, _ := trace.StartSpanFromContext(ctx, "")
 	span.SetTag("action", action)
 	defer span.Finish()
@@ -618,29 +617,29 @@ func postHelper(ctx context.Context, httpClient *http.Client, stats *statsd.Clie
 		encoder = json.NewEncoder(&bodyBuffer)
 	}
 	if err := encoder.Encode(bodyObject); err != nil {
-		stats.Count(action+".error_total", 1, []string{"cause:json"}, 1.0)
+		reporter.Count(action+".error_total", 1, []string{"cause:json"}, 1.0)
 		innerLogger.WithError(err).Error("Could not render JSON")
 		return err
 	}
 	if compress {
 		// don't forget to flush leftover compressed bytes to the buffer
 		if err := compressor.Close(); err != nil {
-			stats.Count(action+".error_total", 1, []string{"cause:compress"}, 1.0)
+			reporter.Count(action+".error_total", 1, []string{"cause:compress"}, 1.0)
 			innerLogger.WithError(err).Error("Could not finalize compression")
 			return err
 		}
 	}
-	stats.TimeInMilliseconds(action+".duration_ns", float64(time.Since(marshalStart).Nanoseconds()), []string{"part:json"}, 1.0)
+	reporter.TimeInMilliseconds(action+".duration_ns", float64(time.Since(marshalStart).Nanoseconds()), []string{"part:json"}, 1.0)
 
 	// Len reports the unread length, so we have to record this before the
 	// http client consumes it
 	bodyLength := bodyBuffer.Len()
-	stats.Histogram(action+".content_length_bytes", float64(bodyLength), nil, 1.0)
+	reporter.Histogram(action+".content_length_bytes", float64(bodyLength), nil, 1.0)
 
 	req, err := http.NewRequest(http.MethodPost, endpoint, &bodyBuffer)
 
 	if err != nil {
-		stats.Count(action+".error_total", 1, []string{"cause:construct"}, 1.0)
+		reporter.Count(action+".error_total", 1, []string{"cause:construct"}, 1.0)
 		innerLogger.WithError(err).Error("Could not construct request")
 		return err
 	}
@@ -653,7 +652,7 @@ func postHelper(ctx context.Context, httpClient *http.Client, stats *statsd.Clie
 
 	err = tracer.InjectRequest(span.Trace, req)
 	if err != nil {
-		stats.Count("veneur.opentracing.flush.inject.errors", 1, nil, 1.0)
+		reporter.Count("veneur.opentracing.flush.inject.errors", 1, nil, 1.0)
 		innerLogger.WithError(err).Error("Error injecting header")
 	}
 
@@ -665,18 +664,18 @@ func postHelper(ctx context.Context, httpClient *http.Client, stats *statsd.Clie
 			// and ditch the url (which might contain secrets)
 			err = urlErr.Err
 		}
-		stats.Count(action+".error_total", 1, []string{"cause:io"}, 1.0)
+		reporter.Count(action+".error_total", 1, []string{"cause:io"}, 1.0)
 		innerLogger.WithError(err).Error("Could not execute request")
 		return err
 	}
-	stats.TimeInMilliseconds(action+".duration_ns", float64(time.Since(requestStart).Nanoseconds()), []string{"part:post"}, 1.0)
+	reporter.TimeInMilliseconds(action+".duration_ns", float64(time.Since(requestStart).Nanoseconds()), []string{"part:post"}, 1.0)
 	defer resp.Body.Close()
 
 	responseBody, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		// this error is not fatal, since we only need the body for reporting
 		// purposes
-		stats.Count(action+".error_total", 1, []string{"cause:readresponse"}, 1.0)
+		reporter.Count(action+".error_total", 1, []string{"cause:readresponse"}, 1.0)
 		innerLogger.WithError(err).Error("Could not read response body")
 	}
 	resultLogger := innerLogger.WithFields(logrus.Fields{
@@ -689,13 +688,13 @@ func postHelper(ctx context.Context, httpClient *http.Client, stats *statsd.Clie
 	})
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		stats.Count(action+".error_total", 1, []string{fmt.Sprintf("cause:%d", resp.StatusCode)}, 1.0)
+		reporter.Count(action+".error_total", 1, []string{fmt.Sprintf("cause:%d", resp.StatusCode)}, 1.0)
 		resultLogger.Error("Could not POST")
 		return err
 	}
 
 	// make sure the error metric isn't sparse
-	stats.Count(action+".error_total", 0, nil, 1.0)
+	reporter.Count(action+".error_total", 0, nil, 1.0)
 	resultLogger.Debug("POSTed successfully")
 	return nil
 }
@@ -774,7 +773,7 @@ func flushSpansDatadog(ctx context.Context, s *Server, nilTracer opentracing.Tra
 		// another curious constraint of this endpoint is that it does not
 		// support "Content-Encoding: deflate"
 
-		err := postHelper(span.Attach(ctx), s.HTTPClient, s.Statsd, fmt.Sprintf("%s/spans", s.DDTraceAddress), finalTraces, "flush_traces", false)
+		err := postHelper(span.Attach(ctx), s.HTTPClient, s.Reporter, fmt.Sprintf("%s/spans", s.DDTraceAddress), finalTraces, "flush_traces", false)
 
 		if err == nil {
 			log.WithField("traces", len(finalTraces)).Info("Completed flushing traces to Datadog")
