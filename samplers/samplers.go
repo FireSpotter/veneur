@@ -76,12 +76,12 @@ type JSONMetric struct {
 type Counter struct {
 	Name  string
 	Tags  []string
-	value int64
+	value float64
 }
 
 // Sample adds a sample to the counter.
 func (c *Counter) Sample(sample float64, sampleRate float32) {
-	c.value += int64(sample) * int64(1/sampleRate)
+	c.value += sample * 1/float64(sampleRate)
 }
 
 // Flush generates a DDMetric from the current state of this Counter.
@@ -119,7 +119,7 @@ func (c *Counter) Export() (JSONMetric, error) {
 
 // Combine merges the values seen with another set (marshalled as a byte slice)
 func (c *Counter) Combine(other []byte) error {
-	var otherCounts int64
+	var otherCounts float64
 	buf := bytes.NewReader(other)
 	err := binary.Read(buf, binary.LittleEndian, &otherCounts)
 
